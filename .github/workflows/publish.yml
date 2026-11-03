@@ -2,9 +2,13 @@ name: Publish
 
 # Requiere configurar este repositorio como trusted publisher del paquete en
 # https://www.npmjs.com/package/opencode-notify-linux/access
+#
+# Se ejecuta a mano para no fallar en cada tag hasta que el trusted publisher
+# esté configurado. Cuando lo esté, descomenta el bloque `push`.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+  # push:
+  #   tags: ["v*"]
 
 permissions:
   contents: read
