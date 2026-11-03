@@ -17,6 +17,9 @@ import {
   isCinnamon,
   notificationID,
   opencodeExecutable,
+  parseHyprlandClient,
+  parseHyprlandClients,
+  parseSwayTree,
   parseWindows,
   permissionDetail,
   sameInstance,
@@ -24,6 +27,7 @@ import {
   sameWindowID,
   terminalAttempts,
   truncate,
+  type SwayWindow,
   type Window,
 } from "./lib.ts"
 import { messagesFor, resolveLanguage, type Messages } from "./messages.ts"
@@ -162,10 +166,12 @@ function createNotifier(context: Context, options: ResolvedOptions, messages: Me
     args.push(`--icon=${existsSync(icon) ? icon : "utilities-terminal"}`)
     if (critical) args.push("--expire-time=0", "--hint=boolean:resident:true")
 
-    // With an action, notify-send must stay alive until the user clicks or
-    // dismisses the notification. When the action is invoked, it prints its
-    // name to stdout, which is how we know to open the session.
-    if (input.onOpen && capabilities.actions) args.push(`--action=default=${messages.open}`, "--wait")
+    // With actions, notify-send must stay alive until the user clicks or
+    // dismisses the notification. When an action is invoked, it prints its
+    // name to stdout, which is how we know what to do.
+    if (input.onOpen && capabilities.actions) {
+      args.push(`--action=default=${messages.open}`, `--action=dismiss=${messages.dismiss}`, "--wait")
+    }
     args.push(options.appName, body)
 
     const child = execFile("notify-send", args, { encoding: "utf8" }, (error, stdout) => {
@@ -174,7 +180,12 @@ function createNotifier(context: Context, options: ResolvedOptions, messages: Me
         debug(`notify-send failed: ${error.message}`)
         return
       }
-      if (input.onOpen && stdout.trim() === "default") input.onOpen()
+      const choice = stdout.trim()
+      if (choice === "dismiss") {
+        debug("notification dismissed")
+        return
+      }
+      if (input.onOpen && choice === "default") input.onOpen()
     })
 
     // A notification can stay open for a long time waiting for a click. Do not
@@ -324,26 +335,126 @@ async function terminatorWindowTitle(): Promise<string | undefined> {
   return output.trim() || undefined
 }
 
+type WindowBackend = {
+  name: string
+  list(): Promise<Window[]>
+  active(): Promise<Window | undefined>
+  focus(id: string): Promise<void>
+  sameID(left: string | undefined, right: string | undefined): boolean
+  preferred?(candidates: Window[]): Promise<Window | undefined>
+}
+
+const x11Backend: WindowBackend = {
+  name: "x11",
+  async list() {
+    return parseWindows(await run("wmctrl", ["-lpx"]))
+  },
+  async active() {
+    const id = await activeWindowID()
+    if (!id) return undefined
+    return (await x11Backend.list()).find((window) => sameWindowID(window.id, id))
+  },
+  async focus(id) {
+    await run("wmctrl", ["-i", "-a", id])
+  },
+  sameID(left, right) {
+    return sameWindowID(left, right)
+  },
+  async preferred(candidates) {
+    const title = await terminatorWindowTitle().catch(() => undefined)
+    return title ? candidates.find((window) => window.title === title) : undefined
+  },
+}
+
+async function swayWindows(): Promise<SwayWindow[]> {
+  return parseSwayTree(JSON.parse(await run("swaymsg", ["-t", "get_tree", "-r"])))
+}
+
+const swayBackend: WindowBackend = {
+  name: "sway",
+  async list() {
+    return (await swayWindows()).map(({ id, pid, title }) => ({ id, pid, title }))
+  },
+  async active() {
+    const focused = (await swayWindows()).find((window) => window.focused)
+    return focused ? { id: focused.id, pid: focused.pid, title: focused.title } : undefined
+  },
+  async focus(id) {
+    await run("swaymsg", [`[con_id=${id.replace(/^sway:/, "")}]`, "focus"])
+  },
+  sameID(left, right) {
+    return Boolean(left && right && left === right)
+  },
+}
+
+async function hyprlandClients(): Promise<Window[]> {
+  return parseHyprlandClients(JSON.parse(await run("hyprctl", ["clients", "-j"])))
+}
+
+const hyprlandBackend: WindowBackend = {
+  name: "hyprland",
+  async list() {
+    return hyprlandClients()
+  },
+  async active() {
+    return parseHyprlandClient(JSON.parse(await run("hyprctl", ["activewindow", "-j"])))
+  },
+  async focus(id) {
+    const address = id.replace(/^hypr:/, "")
+    await run("hyprctl", ["dispatch", "focuswindow", `address:${address}`])
+  },
+  sameID(left, right) {
+    return Boolean(left && right && left.toLowerCase() === right.toLowerCase())
+  },
+}
+
+let backendPromise: Promise<WindowBackend | undefined> | undefined
+
 /**
- * Bring the terminal or IDE window that hosts this TUI to the front. The TUI
- * is a child of that window's process, so walking up /proc and matching the
- * window's _NET_WM_PID works for Terminator, GNOME Terminal, VS Code,
- * JetBrains and most other terminals.
- *
- * Some terminals (GNOME Terminal, Terminator) let a single process own every
- * window. Matching the expected terminal title picks the exact window that
- * hosts this TUI; the D-Bus title and the active window are fallbacks.
+ * Pick the window backend for this session: Hyprland and sway on Wayland,
+ * then X11 (including XWayland) as the fallback. A backend is only accepted
+ * when it can list windows, so a stale environment variable degrades to the
+ * next option instead of breaking focus.
  */
-async function terminalWindowID(expectedTitle?: string): Promise<string | undefined> {
-  if (process.platform !== "linux" || !process.env.DISPLAY) return undefined
+async function selectBackend(): Promise<WindowBackend | undefined> {
+  if (process.platform !== "linux") return undefined
 
-  let windows: Window[]
-  try {
-    windows = parseWindows(await run("wmctrl", ["-lpx"]))
-  } catch {
-    return undefined
+  const wayland = process.env.XDG_SESSION_TYPE === "wayland" || Boolean(process.env.WAYLAND_DISPLAY)
+  const candidates: WindowBackend[] = []
+  if (wayland && process.env.HYPRLAND_INSTANCE_SIGNATURE) candidates.push(hyprlandBackend)
+  if (wayland && process.env.SWAYSOCK) candidates.push(swayBackend)
+  if (process.env.DISPLAY) candidates.push(x11Backend)
+
+  for (const backend of candidates) {
+    try {
+      await backend.list()
+      debug(`window backend=${backend.name}`)
+      return backend
+    } catch {
+      debug(`window backend=${backend.name} unavailable`)
+    }
   }
+  debug("window backend=none")
+  return undefined
+}
 
+function windowBackend(): Promise<WindowBackend | undefined> {
+  backendPromise ??= selectBackend()
+  return backendPromise
+}
+
+/**
+ * Find the window that hosts this TUI. The TUI is a child of that window's
+ * process, so walking up /proc and matching the window PID works for
+ * terminals, VS Code, JetBrains and most other apps. When several windows
+ * share a PID (GNOME Terminal, Terminator), the expected title and the
+ * backend-specific preference pick the exact one.
+ */
+async function findWindow(expectedTitle?: string): Promise<Window | undefined> {
+  const backend = await windowBackend()
+  if (!backend) return undefined
+
+  const windows = await backend.list().catch(() => [])
   for (const pid of processAncestors(process.pid)) {
     const candidates = windows.filter((window) => window.pid === pid)
     const first = candidates[0]
@@ -351,28 +462,26 @@ async function terminalWindowID(expectedTitle?: string): Promise<string | undefi
 
     if (expectedTitle) {
       const exact = candidates.filter((window) => window.title === expectedTitle)
-      if (exact.length === 1) return exact[0].id
+      if (exact.length === 1) return exact[0]
       if (exact.length > 1) {
-        const active = await activeWindowID().catch(() => undefined)
-        const match = exact.find((window) => sameWindowID(window.id, active))
-        return (match ?? exact[0]).id
+        const active = await backend.active().catch(() => undefined)
+        return exact.find((window) => backend.sameID(window.id, active?.id)) ?? exact[0]
       }
     }
 
-    if (candidates.length === 1) return first.id
+    if (candidates.length === 1) return first
 
-    const title = await terminatorWindowTitle().catch(() => undefined)
-    const exact = title ? candidates.find((window) => window.title === title) : undefined
-    if (exact) return exact.id
+    const preferred = backend.preferred ? await backend.preferred(candidates).catch(() => undefined) : undefined
+    if (preferred) return preferred
 
-    const active = await activeWindowID().catch(() => undefined)
-    const activeCandidate = candidates.find((window) => sameWindowID(window.id, active))
-    if (activeCandidate) return activeCandidate.id
+    const active = await backend.active().catch(() => undefined)
+    const activeCandidate = candidates.find((window) => backend.sameID(window.id, active?.id))
+    if (activeCandidate) return activeCandidate
 
     const fallback = candidates.find(
       (window) => /(^|\s)OC\s*\|/.test(window.title) || window.title.includes("OpenCode"),
     )
-    return (fallback ?? first).id
+    return fallback ?? first
   }
   return undefined
 }
@@ -382,14 +491,12 @@ async function terminalWindowID(expectedTitle?: string): Promise<string | undefi
  * is the terminal the user was typing in when the turn started.
  */
 async function activeTerminalWindowID(expectedTitle?: string): Promise<string | undefined> {
-  const id = await terminalWindowID(expectedTitle)
-  if (!id) return undefined
-  try {
-    const active = await activeWindowID()
-    return sameWindowID(id, active) ? id : undefined
-  } catch {
-    return undefined
-  }
+  const window = await findWindow(expectedTitle)
+  if (!window) return undefined
+  const backend = await windowBackend()
+  if (!backend) return undefined
+  const active = await backend.active().catch(() => undefined)
+  return backend.sameID(window.id, active?.id) ? window.id : undefined
 }
 
 /**
@@ -398,11 +505,13 @@ async function activeTerminalWindowID(expectedTitle?: string): Promise<string | 
  * on a busy desktop.
  */
 async function focusWindow(id: string): Promise<void> {
+  const backend = await windowBackend()
+  if (!backend) return
   for (let attempt = 0; attempt < 3; attempt++) {
-    await run("wmctrl", ["-i", "-a", id]).catch(() => {})
+    await backend.focus(id).catch(() => {})
     await delay(attempt === 0 ? 120 : 90)
-    const active = await activeWindowID().catch(() => undefined)
-    if (sameWindowID(id, active)) return
+    const active = await backend.active().catch(() => undefined)
+    if (backend.sameID(id, active?.id)) return
   }
 }
 
@@ -416,6 +525,7 @@ export default Plugin.define({
     const notify = createNotifier(context, options, messages)
     debugEnabled = options.debug
     debug(`setup language=${options.language} onlyWhenUnfocused=${options.onlyWhenUnfocused}`)
+    void windowBackend()
 
     let disposed = false
 
@@ -488,7 +598,7 @@ export default Plugin.define({
       // Another live TUI still owns the session: just raise its window. Never
       // switch this TUI, which may be showing something unrelated.
       if (owner && !sameInstance(owner.instance, instanceID)) {
-        const remote = owner.window ?? (await terminalWindowID(titleForSession(sessionID)).catch(() => undefined))
+        const remote = owner.window ?? (await findWindow(titleForSession(sessionID)).catch(() => undefined))?.id
         debug(`open session=${sessionID} owner-window=${remote ?? "none"}`)
         if (remote) await focusWindow(remote)
         return
@@ -501,7 +611,7 @@ export default Plugin.define({
           try {
             if (context.ui.tabs.enabled()) {
               const id =
-                ownWindows.get(sessionID) ?? (await terminalWindowID(currentTitle()).catch(() => undefined))
+                ownWindows.get(sessionID) ?? (await findWindow(currentTitle()).catch(() => undefined))?.id
               if (id) await focusWindow(id)
               if (context.ui.tabs.focus(sessionID)) {
                 debug(`open session=${sessionID} tab dir=${directory ?? "none"}`)
@@ -531,7 +641,7 @@ export default Plugin.define({
       const id =
         ownWindows.get(sessionID) ??
         (owner && sameInstance(owner.instance, instanceID) ? owner.window : undefined) ??
-        (await terminalWindowID(currentTitle()).catch(() => undefined))
+        (await findWindow(currentTitle()).catch(() => undefined))?.id
       debug(`open session=${sessionID} window=${id ?? "none"}`)
       if (id) await focusWindow(id)
 

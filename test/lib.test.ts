@@ -4,6 +4,9 @@ import {
   isCinnamon,
   notificationID,
   opencodeExecutable,
+  parseHyprlandClient,
+  parseHyprlandClients,
+  parseSwayTree,
   parseWindows,
   permissionDetail,
   sameInstance,
@@ -40,6 +43,56 @@ test("sameWindowID compara en hexadecimal e ignora ceros a la izquierda", () => 
   assert.equal(sameWindowID("0x03e00006", "0x3e00006"), true)
   assert.equal(sameWindowID("0x03e00006", "0x04a00007"), false)
   assert.equal(sameWindowID(undefined, "0x03e00006"), false)
+})
+
+test("parseSwayTree recorre el árbol y conserva el foco", () => {
+  const tree = {
+    id: 1,
+    name: "root",
+    nodes: [
+      {
+        id: 2,
+        name: "workspace",
+        nodes: [
+          { id: 3, pid: 100, name: "OC | Proyecto", focused: true, nodes: [] },
+          { id: 4, pid: 200, name: "Otra", focused: false, nodes: [] },
+        ],
+      },
+      { id: 5, pid: 300, window_properties: { title: "Sin name" }, floating_nodes: [] },
+    ],
+  }
+
+  assert.deepEqual(parseSwayTree(tree), [
+    { id: "sway:3", pid: 100, title: "OC | Proyecto", focused: true },
+    { id: "sway:4", pid: 200, title: "Otra", focused: false },
+    { id: "sway:5", pid: 300, title: "Sin name", focused: false },
+  ])
+  assert.deepEqual(parseSwayTree(undefined), [])
+})
+
+test("parseHyprlandClients filtra clientes ocultos o sin mapear", () => {
+  const clients = [
+    { address: "0xABC", pid: 100, title: "OC | Proyecto", mapped: true, hidden: false },
+    { address: "0xDEF", pid: 200, title: "Oculta", mapped: true, hidden: true },
+    { address: "0x123", pid: 300, title: "Sin mapear", mapped: false },
+    { address: "", pid: 400, title: "Sin dirección" },
+    { address: "0x456", pid: 0, title: "Sin PID" },
+  ]
+
+  assert.deepEqual(parseHyprlandClients(clients), [
+    { id: "hypr:0xabc", pid: 100, title: "OC | Proyecto" },
+  ])
+  assert.deepEqual(parseHyprlandClients({}), [])
+})
+
+test("parseHyprlandClient acepta el objeto de activewindow", () => {
+  assert.deepEqual(parseHyprlandClient({ address: "0xABC", pid: 100, title: "OC" }), {
+    id: "hypr:0xabc",
+    pid: 100,
+    title: "OC",
+  })
+  assert.equal(parseHyprlandClient({}), undefined)
+  assert.equal(parseHyprlandClient({ address: "0x1", pid: 1, hidden: true }), undefined)
 })
 
 test("sameLocation normaliza rutas", () => {

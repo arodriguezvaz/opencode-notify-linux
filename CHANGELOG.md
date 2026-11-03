@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- Enfoque de ventanas en Wayland para sway (`swaymsg`) e Hyprland (`hyprctl`), con X11 como fallback.
+- Acciones «Abrir» y «Descartar» en la notificación.
+
 ## 1.1.0
 
 - No notificar cuando la terminal de la sesión ya está enfocada (`onlyWhenUnfocused`).

@@ -26,6 +26,8 @@ Las sesiones de los subagentes se ignoran. Los errores y las solicitudes de perm
 - **Prefijo de proyecto** (`mi-proyecto · …`) cuando la sesión pertenece a otro directorio.
 - **Detalle del permiso**: muestra la acción y el recurso solicitado (por ejemplo `bash: git status`).
 - **Español e inglés** según el locale, o forzado con la opción `language`.
+- **Wayland**: enfoque de ventanas en sway (`swaymsg`) e Hyprland (`hyprctl`), además de X11.
+- **Abrir o descartar**: dos acciones en la propia notificación.
 - **Fallback integrado**: si no existe `notify-send`, usa las notificaciones de atención de OpenCode.
 
 ## Al pulsar una notificación
@@ -33,14 +35,15 @@ Las sesiones de los subagentes se ignoran. Los errores y las solicitudes de perm
 - Si la TUI que abrió el turno sigue viva, trae al frente su ventana.
 - Si se ha cerrado, intenta abrir una terminal nueva en el directorio del proyecto y recuperar la sesión con `opencode --session <id>`.
 - Si no encuentra una terminal compatible, pregunta si quieres abrir la sesión en la terminal actual.
+- También puedes **descartar** la notificación sin abrir nada.
 
 Se admiten Terminator, GNOME Terminal, Konsole, XFCE Terminal, Kitty, Alacritty, WezTerm, Foot, `x-terminal-emulator`, `xterm` y `$TERMINAL`.
 
 ## Requisitos
 
-- Linux con X11 para poder enfocar ventanas.
+- Linux con X11 o Wayland (sway/Hyprland) para poder enfocar ventanas.
 - OpenCode v2.
-- `notify-send`, `wmctrl` y `xprop`.
+- `notify-send` siempre; en X11, `wmctrl` y `xprop`; en sway, `swaymsg`; en Hyprland, `hyprctl`.
 
 En Debian o Ubuntu:
 
@@ -50,7 +53,7 @@ sudo apt install libnotify-bin wmctrl x11-utils
 
 Las acciones al hacer clic y el reemplazo de notificaciones necesitan libnotify 0.7.9 o superior. En versiones anteriores el aviso se muestra igualmente, pero el clic no abre la sesión. Si no hay `notify-send`, el plugin recurre a las notificaciones integradas de OpenCode (sin enfoque de ventana).
 
-Probado en Cinnamon con Terminator. El enfoque de ventanas no funciona en Wayland nativo, aunque las notificaciones pueden seguir apareciendo.
+Probado en Cinnamon con Terminator. En Wayland el backend se elige por entorno: Hyprland si existe `HYPRLAND_INSTANCE_SIGNATURE`, sway si existe `SWAYSOCK`, y X11 (incluido XWayland) como último recurso. GNOME y KDE Wayland no ofrecen una forma fiable de enfocar ventanas por CLI, así que ahí el enfoque puede no funcionar; las notificaciones sí siguen apareciendo.
 
 ## Instalación
 
@@ -129,11 +132,16 @@ notify-send --help | grep -E -- '--action|--replace-id'
 wmctrl -lpx
 xprop -root _NET_ACTIVE_WINDOW
 
+# Wayland: backend detectado y ventanas disponibles
+echo "$XDG_SESSION_TYPE · $SWAYSOCK · $HYPRLAND_INSTANCE_SIGNATURE"
+swaymsg -t get_tree -r    # sway
+hyprctl clients -j        # Hyprland
+
 # ¿Está cargado el plugin?
 opencode plugin list
 ```
 
-Si usas Wayland, el enfoque de ventanas no funcionará; las notificaciones sí pueden seguir apareciendo.
+Si usas GNOME o KDE en Wayland, el enfoque de ventanas puede no funcionar; las notificaciones sí pueden seguir apareciendo. El registro de depuración indica qué backend se seleccionó (`window backend=…`).
 
 ## Desarrollo
 
@@ -145,7 +153,7 @@ npm run typecheck
 npm test
 ```
 
-El código está en `src/tui.ts`, con los helpers puros en `src/lib.ts`, los textos en `src/messages.ts` y las opciones en `src/options.ts`. No requiere build: OpenCode ejecuta el TypeScript tal cual.
+El código está en `src/tui.ts`, con los helpers puros en `src/lib.ts`, los textos en `src/messages.ts` y las opciones en `src/options.ts`. Los tests cubren también los parsers de sway e Hyprland. No requiere build: OpenCode ejecuta el TypeScript tal cual.
 
 ## Licencia
 

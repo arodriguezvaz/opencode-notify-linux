@@ -15,6 +15,7 @@ test("mensajes en español", () => {
   assert.equal(messages.form(undefined, "¿Qué dosis?"), "Se requiere tu respuesta: ¿Qué dosis?")
   assert.equal(messages.form("Comprar pan", undefined), "Se requiere tu respuesta en Comprar pan")
   assert.equal(messages.form(undefined, undefined), "Se requiere tu respuesta")
+  assert.equal(messages.dismiss, "Descartar")
 })
 
 test("mensajes en inglés", () => {
@@ -23,6 +24,7 @@ test("mensajes en inglés", () => {
   assert.equal(messages.permission(undefined, undefined), "Permission required")
   assert.equal(messages.form("Buy bread", undefined), "Response required in Buy bread")
   assert.equal(messages.open, "Open")
+  assert.equal(messages.dismiss, "Dismiss")
 })
 
 test("resolveLanguage respeta la opción y detecta el locale", () => {

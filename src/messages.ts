@@ -14,6 +14,7 @@ export type Messages = {
   openHere: string
   cancel: string
   open: string
+  dismiss: string
 }
 
 const spanish: Messages = {
@@ -34,6 +35,7 @@ const spanish: Messages = {
   openHere: "Abrir aquí",
   cancel: "Cancelar",
   open: "Abrir",
+  dismiss: "Descartar",
 }
 
 const english: Messages = {
@@ -54,6 +56,7 @@ const english: Messages = {
   openHere: "Open here",
   cancel: "Cancel",
   open: "Open",
+  dismiss: "Dismiss",
 }
 
 export function messagesFor(language: Language): Messages {

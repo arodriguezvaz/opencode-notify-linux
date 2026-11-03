@@ -14,6 +14,10 @@ export type PermissionEventData = {
   readonly message?: string | undefined
 }
 
+export type SwayWindow = Window & {
+  readonly focused: boolean
+}
+
 /** Cut a notification body without leaving a dangling space before the ellipsis. */
 export function truncate(value: string, max: number): string {
   const text = value.trim()
@@ -136,3 +140,71 @@ export function terminalAttempts(
 export function opencodeExecutable(execPath: string): string {
   return /opencode/i.test(basename(execPath)) ? execPath : "opencode"
 }
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function stringValue(value: unknown, key: string): string | undefined {
+  const result = objectValue(value)?.[key]
+  return typeof result === "string" ? result : undefined
+}
+
+function numberValue(value: unknown, key: string): number | undefined {
+  const result = objectValue(value)?.[key]
+  return typeof result === "number" && Number.isFinite(result) ? result : undefined
+}
+
+/**
+ * `swaymsg -t get_tree -r` returns a nested tree. Only view containers have a
+ * PID; outputs and workspaces do not, so they are skipped. `name` and
+ * `window_properties.title` carry the window title depending on the app.
+ */
+export function parseSwayTree(value: unknown): SwayWindow[] {
+  const windows: SwayWindow[] = []
+
+  const visit = (node: unknown) => {
+    const record = objectValue(node)
+    if (!record) return
+
+    const id = numberValue(record, "id")
+    const pid = numberValue(record, "pid")
+    if (id !== undefined && pid !== undefined && pid > 0) {
+      const title = stringValue(record, "name") ?? stringValue(record.window_properties, "title") ?? ""
+      windows.push({ id: `sway:${id}`, pid, title, focused: record.focused === true })
+    }
+
+    for (const key of ["nodes", "floating_nodes"]) {
+      const children = record[key]
+      if (Array.isArray(children)) for (const child of children) visit(child)
+    }
+  }
+
+  if (Array.isArray(value)) for (const node of value) visit(node)
+  else visit(value)
+  return windows
+}
+
+/** `hyprctl clients -j` entries; `mapped: false` and hidden clients are skipped. */
+export function parseHyprlandClient(value: unknown): Window | undefined {
+  const record = objectValue(value)
+  if (!record) return undefined
+
+  const address = stringValue(record, "address")
+  const pid = numberValue(record, "pid")
+  if (!address || pid === undefined || pid <= 0) return undefined
+  if (record.mapped === false || record.hidden === true) return undefined
+
+  return { id: `hypr:${address.toLowerCase()}`, pid, title: stringValue(record, "title") ?? "" }
+}
+
+export function parseHyprlandClients(value: unknown): Window[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((client) => {
+    const window = parseHyprlandClient(client)
+    return window ? [window] : []
+  })
+}
+
