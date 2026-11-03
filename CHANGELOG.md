@@ -11,7 +11,7 @@
 - Compatibilidad con más terminales y con `$TERMINAL`.
 - Fallback a las notificaciones de atención de OpenCode sin `notify-send`.
 - Textos en español e inglés.
-- Tests, typecheck, CI y publicación con procedencia.
+- Tests, typecheck y CI.
 
 ## 1.0.0
 

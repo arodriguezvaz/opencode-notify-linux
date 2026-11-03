@@ -5,7 +5,6 @@ Notificaciones de escritorio para **OpenCode TUI** en Linux. Avisa cuando una se
 > Native Linux desktop notifications for the OpenCode TUI, with click-to-focus and click-to-reopen support.
 
 [![CI](https://github.com/arodriguezvaz/opencode-notify-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/arodriguezvaz/opencode-notify-linux/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/opencode-notify-linux)](https://www.npmjs.com/package/opencode-notify-linux)
 
 ## Notificaciones
 
@@ -55,28 +54,14 @@ Probado en Cinnamon con Terminator. El enfoque de ventanas no funciona en Waylan
 
 ## Instalación
 
-### Desde npm (recomendado)
-
-```bash
-opencode plugin add opencode-notify-linux
-```
-
-Esto instala el paquete y lo añade a la configuración global. También puedes añadirlo a mano a `~/.config/opencode/cli.json`:
-
-```jsonc
-{
-  "plugins": ["opencode-notify-linux"]
-}
-```
-
-### Desde el repositorio
+Clona el repositorio en el directorio de plugins global de OpenCode:
 
 ```bash
 git clone https://github.com/arodriguezvaz/opencode-notify-linux.git \
   ~/.config/opencode/plugins/opencode-notify-linux
 ```
 
-OpenCode descubre los plugins de ese directorio automáticamente y carga el entrypoint `./tui` declarado en `package.json`. **No hace falta compilarlo ni ejecutar `npm install`** para utilizarlo.
+OpenCode descubre los plugins de ese directorio automáticamente y carga el entrypoint `./tui` declarado en `package.json`. **No hace falta compilarlo ni instalar dependencias** para utilizarlo.
 
 Para actualizarlo:
 
@@ -86,13 +71,13 @@ git -C ~/.config/opencode/plugins/opencode-notify-linux pull
 
 ## Configuración
 
-Sin opciones funciona directamente. Si quieres cambiar algo, usa la forma de objeto en `cli.json` (o en `opencode.json`):
+Sin opciones funciona directamente. Si quieres cambiar algo, añade el plugin con la forma de objeto en `~/.config/opencode/cli.json`:
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "opencode-notify-linux",
+      "package": "./plugins/opencode-notify-linux",
       "options": {
         "onlyWhenUnfocused": true,
         "language": "es",
@@ -103,6 +88,8 @@ Sin opciones funciona directamente. Si quieres cambiar algo, usa la forma de obj
   ]
 }
 ```
+
+La ruta es relativa a `~/.config/opencode`. Añadir esta entrada no duplica el plugin: OpenCode lo sigue cargando una sola vez.
 
 | Opción | Por defecto | Descripción |
 | --- | --- | --- |
@@ -150,8 +137,10 @@ Si usas Wayland, el enfoque de ventanas no funcionará; las notificaciones sí p
 
 ## Desarrollo
 
+Solo para desarrollo; para usar el plugin no necesitas Node ni ningún gestor de paquetes.
+
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 ```
