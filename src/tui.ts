@@ -1,14 +1,73 @@
-import { execFile, spawn } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { execFile, execFileSync, spawn } from "node:child_process"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin/tui"
+import type { Context } from "@opencode/plugin/tui/context"
+import {
+  isCinnamon,
+  notificationID,
+  opencodeExecutable,
+  parseWindows,
+  permissionDetail,
+  sameInstance,
+  sameLocation,
+  sameWindowID,
+  terminalAttempts,
+  truncate,
+  type Window,
+} from "./lib.ts"
+import { messagesFor, resolveLanguage, type Messages } from "./messages.ts"
+import { resolveOptions, type ResolvedOptions } from "./options.ts"
 
 type Urgency = "low" | "normal" | "critical"
 
+type NotifyInput = {
+  body: string
+  urgency?: Urgency
+  sessionID?: string
+  onOpen?: () => void
+}
+
+const userId = typeof process.getuid === "function" ? process.getuid() : "user"
 const configDir = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
-const iconPath = join(configDir, "opencode", "icons", "opencode.png")
-const markerDir = join(tmpdir(), "opencode-desktop-notify")
+const defaultIconPath = join(configDir, "opencode", "icons", "opencode.png")
+
+/**
+ * Keep state per user: on a shared machine `/tmp/opencode-desktop-notify`
+ * belongs to whoever created it first and the other users cannot write their
+ * markers, which silently disables their notifications.
+ */
+const runtimeDir = process.env.XDG_RUNTIME_DIR
+  ? join(process.env.XDG_RUNTIME_DIR, "opencode-notify-linux")
+  : join(tmpdir(), `opencode-notify-linux-${userId}`)
+
+let debugEnabled = true
+
+/**
+ * Small, bounded trace that makes it possible to see which TUI claimed an
+ * event and which window it focused. Never keeps more than 256 KiB.
+ */
+function debug(message: string) {
+  if (!debugEnabled) return
+  try {
+    mkdirSync(runtimeDir, { recursive: true })
+    const path = join(runtimeDir, "debug.log")
+    if (existsSync(path) && statSync(path).size > 256 * 1024) writeFileSync(path, "")
+    appendFileSync(path, `${new Date().toISOString()} pid=${process.pid} ${message}\n`)
+  } catch {
+    // Diagnostics are best-effort.
+  }
+}
 
 /**
  * Every TUI instance receives the same server event, so all of them would
@@ -18,27 +77,12 @@ const markerDir = join(tmpdir(), "opencode-desktop-notify")
 function claimEvent(eventID: string): boolean {
   pruneMarkers()
   try {
-    mkdirSync(markerDir, { recursive: true })
-    const marker = join(markerDir, eventID.replace(/[^A-Za-z0-9._-]/g, "_"))
+    mkdirSync(runtimeDir, { recursive: true })
+    const marker = join(runtimeDir, eventID.replace(/[^A-Za-z0-9._-]/g, "_"))
     writeFileSync(marker, "", { flag: "wx" })
     return true
   } catch {
     return false
-  }
-}
-
-/**
- * Small, bounded trace that makes it possible to see which TUI claimed an
- * event and which window it focused. Never keeps more than 256 KiB.
- */
-function debug(message: string) {
-  try {
-    mkdirSync(markerDir, { recursive: true })
-    const path = join(markerDir, "debug.log")
-    if (existsSync(path) && statSync(path).size > 256 * 1024) writeFileSync(path, "")
-    appendFileSync(path, `${new Date().toISOString()} pid=${process.pid} ${message}\n`)
-  } catch {
-    // Diagnostics are best-effort.
   }
 }
 
@@ -49,8 +93,8 @@ function pruneMarkers() {
   if (now - lastPrune < 60_000) return
   lastPrune = now
   try {
-    for (const name of readdirSync(markerDir)) {
-      const path = join(markerDir, name)
+    for (const name of readdirSync(runtimeDir)) {
+      const path = join(runtimeDir, name)
       // Keep markers for a day: a reconnecting TUI can replay old events and
       // must not show a second notification for the same turn.
       if (now - statSync(path).mtimeMs > 24 * 60 * 60_000) unlinkSync(path)
@@ -60,52 +104,86 @@ function pruneMarkers() {
   }
 }
 
-function sameLocation(left?: string, right?: string): boolean {
-  // An event without a directory used to count as "here", so every TUI
-  // claimed sessions from other projects. Treat unknown as "not here":
-  // callers pass the session's own location when the event omits it.
-  if (!left || !right) return false
-  return resolve(left) === resolve(right)
+type NotifyCapabilities = {
+  available: boolean
+  actions: boolean
+  replace: boolean
 }
 
-type NotifyOptions = {
-  body: string
-  urgency?: Urgency
-  onOpen?: () => void
+/**
+ * `--action` and `--replace-id` need libnotify 0.7.9+. Detect them once so an
+ * old notify-send still shows the notification instead of failing outright.
+ */
+function notifySendCapabilities(): NotifyCapabilities {
+  try {
+    const help = execFileSync("notify-send", ["--help"], { encoding: "utf8" })
+    return { available: true, actions: help.includes("--action"), replace: help.includes("--replace-id") }
+  } catch {
+    return { available: false, actions: false, replace: false }
+  }
 }
 
-function notify(options: NotifyOptions) {
-  const critical = options.urgency === "critical"
-  // Cinnamon always plays its notification sound for critical urgency, even
-  // with suppress-sound. Use normal urgency instead, but keep critical
-  // notifications resident so they stay visible until dismissed.
-  const args = [
-    "--app-name=OpenCode",
+function expandHome(path: string): string {
+  return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path
+}
+
+function createNotifier(context: Context, options: ResolvedOptions, messages: Messages) {
+  const capabilities = notifySendCapabilities()
+  const icon = options.icon ? expandHome(options.icon) : defaultIconPath
+
+  return function notify(input: NotifyInput) {
+    const body = truncate(input.body, options.maxBodyLength)
+    if (!body) return
+
+    // No libnotify: fall back to the built-in attention pipeline. It cannot
+    // focus a window on click, but at least the user gets the notice.
+    if (!capabilities.available) {
+      void context.attention
+        .notify({ title: options.appName, message: body, notification: { when: "always" } })
+        .then((result) => debug(`attention ok=${result.ok} skipped=${result.skipped ?? "none"}`))
+        .catch(() => {})
+      return
+    }
+
+    const critical = input.urgency === "critical"
+    // Cinnamon always plays its notification sound for critical urgency, even
+    // with suppress-sound. Downgrade only there; other desktops keep the real
+    // critical styling. Resident keeps the alert visible until dismissed.
+    const urgency =
+      critical && isCinnamon(process.env.XDG_CURRENT_DESKTOP, process.env.DESKTOP_SESSION)
+        ? "normal"
+        : input.urgency ?? "normal"
+
+    const args = [`--app-name=${options.appName}`]
     // OpenCode plays its own attention sounds; keep the Linux notification silent.
-    "--hint=boolean:suppress-sound:true",
-    `--urgency=${critical ? "normal" : options.urgency ?? "normal"}`,
-    `--icon=${existsSync(iconPath) ? iconPath : "utilities-terminal"}`,
-  ]
-  if (critical) args.push("--expire-time=0", "--hint=boolean:resident:true")
+    if (options.silent) args.push("--hint=boolean:suppress-sound:true")
+    if (input.sessionID && capabilities.replace) args.push(`--replace-id=${notificationID(input.sessionID)}`)
+    args.push(`--urgency=${urgency}`)
+    args.push(`--icon=${existsSync(icon) ? icon : "utilities-terminal"}`)
+    if (critical) args.push("--expire-time=0", "--hint=boolean:resident:true")
 
-  // With an action, notify-send must stay alive until the user clicks or
-  // dismisses the notification. When the action is invoked, it prints its
-  // name to stdout, which is how we know to open the session.
-  if (options.onOpen) args.push("--action=default=Abrir", "--wait")
-  args.push("OpenCode", options.body)
+    // With an action, notify-send must stay alive until the user clicks or
+    // dismisses the notification. When the action is invoked, it prints its
+    // name to stdout, which is how we know to open the session.
+    if (input.onOpen && capabilities.actions) args.push(`--action=default=${messages.open}`, "--wait")
+    args.push(options.appName, body)
 
-  const child = execFile("notify-send", args, { encoding: "utf8" }, (error, stdout) => {
-    // Ignore failures: notifications are best-effort.
-    if (error) return
-    if (options.onOpen && stdout.trim() === "default") options.onOpen()
-  })
+    const child = execFile("notify-send", args, { encoding: "utf8" }, (error, stdout) => {
+      // Ignore failures: notifications are best-effort.
+      if (error) {
+        debug(`notify-send failed: ${error.message}`)
+        return
+      }
+      if (input.onOpen && stdout.trim() === "default") input.onOpen()
+    })
 
-  // A notification can stay open for a long time waiting for a click. Do not
-  // let it keep the TUI process alive after the user quits.
-  child.unref()
-  unrefStream(child.stdin)
-  unrefStream(child.stdout)
-  unrefStream(child.stderr)
+    // A notification can stay open for a long time waiting for a click. Do not
+    // let it keep the TUI process alive after the user quits.
+    child.unref()
+    unrefStream(child.stdin)
+    unrefStream(child.stdout)
+    unrefStream(child.stderr)
+  }
 }
 
 function unrefStream(stream: NodeJS.ReadableStream | NodeJS.WritableStream | null) {
@@ -125,17 +203,32 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function spawnDetached(command: string, args: string[]): Promise<boolean> {
+function spawnDetached(command: string, args: string[], cwd?: string): Promise<boolean> {
   return new Promise((resolveSpawn) => {
+    let settled = false
+    const finish = (value: boolean) => {
+      if (settled) return
+      settled = true
+      resolveSpawn(value)
+    }
     try {
-      const child = spawn(command, args, { detached: true, stdio: "ignore" })
-      child.once("error", () => resolveSpawn(false))
+      const child = spawn(command, args, { cwd, detached: true, stdio: "ignore" })
+      child.once("error", () => finish(false))
       child.once("spawn", () => {
-        child.unref()
-        resolveSpawn(true)
+        // A terminal that rejects its arguments exits immediately. Give it a
+        // moment before treating the launch as successful (daemonizing
+        // terminals such as gnome-terminal exit 0 right away).
+        const timer = setTimeout(() => {
+          child.unref()
+          finish(true)
+        }, 250)
+        child.once("exit", (code) => {
+          clearTimeout(timer)
+          finish(code === 0)
+        })
       })
     } catch {
-      resolveSpawn(false)
+      finish(false)
     }
   })
 }
@@ -152,38 +245,11 @@ async function openInNewWindow(
   fallbackDirectory?: string,
 ): Promise<boolean> {
   const cwd = directory && existsSync(directory) ? directory : fallbackDirectory
-  const command = [process.execPath, "--session", sessionID, ...(cwd ? [cwd] : [])]
-  const attempts: Array<[string, string[]]> = []
-  if (cwd) {
-    attempts.push(["terminator", [`--working-directory=${cwd}`, "-x", ...command]])
-    attempts.push(["gnome-terminal", [`--working-directory=${cwd}`, "--", ...command]])
-  } else {
-    attempts.push(["terminator", ["-x", ...command]])
-    attempts.push(["gnome-terminal", ["--", ...command]])
-  }
-  attempts.push(["x-terminal-emulator", ["-e", ...command]])
-
-  for (const [program, args] of attempts) {
-    if (await spawnDetached(program, args)) return true
+  const command = [opencodeExecutable(process.execPath), "--session", sessionID, ...(cwd ? [cwd] : [])]
+  for (const [program, args] of terminalAttempts(command, cwd, process.env.TERMINAL)) {
+    if (await spawnDetached(program, args, cwd)) return true
   }
   return false
-}
-
-type Window = {
-  readonly id: string
-  readonly pid: number
-  readonly title: string
-}
-
-function parseWindows(output: string): Window[] {
-  return output.split("\n").flatMap((line) => {
-    const match = line.match(/^(0x[0-9a-f]+)\s+\S+\s+(\d+)\s+\S+\s+\S+\s+(.*)$/i)
-    if (!match) return []
-    const id = match[1]
-    const pid = Number(match[2])
-    if (!id || !Number.isFinite(pid)) return []
-    return [{ id, pid, title: match[3] ?? "" }]
-  })
 }
 
 function processAncestors(pid: number): number[] {
@@ -236,27 +302,9 @@ function isInstanceAlive(instance: string): boolean {
   return true
 }
 
-/**
- * Older plugin versions stored only the PID. Accept those entries when the
- * PID matches so a plugin reload does not orphan the sessions they own.
- */
-function sameInstance(left: string, right: string): boolean {
-  if (left === right) return true
-  const [leftPID, leftStart] = left.split(":")
-  const [rightPID, rightStart] = right.split(":")
-  if (leftPID !== rightPID) return false
-  if (!leftStart || !rightStart) return true
-  return leftStart === rightStart
-}
-
 async function activeWindowID(): Promise<string | undefined> {
   const output = await run("xprop", ["-root", "_NET_ACTIVE_WINDOW"])
   return output.match(/0x[0-9a-f]+/i)?.[0]
-}
-
-function sameWindowID(left?: string, right?: string): boolean {
-  if (!left || !right) return false
-  return Number.parseInt(left, 16) === Number.parseInt(right, 16)
 }
 
 async function terminatorWindowTitle(): Promise<string | undefined> {
@@ -359,17 +407,25 @@ async function focusWindow(id: string): Promise<void> {
 }
 
 export default Plugin.define({
-  id: "andres.desktop-notify",
+  id: "opencode-notify-linux",
   setup(context) {
+    const options = resolveOptions(context.options)
+    const messages = messagesFor(
+      resolveLanguage(options.language, process.env.LC_ALL ?? process.env.LC_MESSAGES ?? process.env.LANG),
+    )
+    const notify = createNotifier(context, options, messages)
+    debugEnabled = options.debug
+    debug(`setup language=${options.language} onlyWhenUnfocused=${options.onlyWhenUnfocused}`)
+
     let disposed = false
 
     function sessionTitle(sessionID: string): string {
-      return context.data.session.get(sessionID)?.title ?? "Sesión"
+      return context.data.session.get(sessionID)?.title ?? messages.session
     }
 
     function titleForSession(sessionID: string): string {
       const title = context.data.session.get(sessionID)?.title
-      if (!title) return "OpenCode"
+      if (!title) return options.appName
       // Keep in sync with the TUI's terminal title.
       return `OC | ${title.length > 40 ? `${title.slice(0, 37)}…` : title}`
     }
@@ -411,7 +467,7 @@ export default Plugin.define({
       const route = context.ui.router.current()
       if (route.type === "session") return titleForSession(route.sessionID)
       if (route.type === "plugin") return `OC | ${route.name}`
-      return "OpenCode"
+      return options.appName
     }
 
     // Exact window recorded when this TUI owned the start of a turn. It is
@@ -464,9 +520,9 @@ export default Plugin.define({
 
         const confirmed = await context.ui.dialog
           .confirm({
-            title: "Sesión sin ventana",
-            message: `«${sessionTitle(sessionID)}» ya no tiene ventana abierta y no he podido abrir una nueva. ¿Abrirla en esta terminal?`,
-            label: { confirm: "Abrir aquí", cancel: "Cancelar" },
+            title: messages.noWindowTitle,
+            message: messages.noWindowMessage(sessionTitle(sessionID)),
+            label: { confirm: messages.openHere, cancel: messages.cancel },
           })
           .catch(() => false)
         if (!confirmed) return
@@ -557,6 +613,28 @@ export default Plugin.define({
     }
 
     /**
+     * Decide whether this TUI shows the notification. When the terminal that
+     * hosts it is already focused, the user is looking at the session and a
+     * popup is just noise; claim the event anyway so no other TUI repeats it.
+     */
+    function deliverWhenUnfocused(sessionID: string, run: () => void) {
+      if (!options.onlyWhenUnfocused) {
+        run()
+        return
+      }
+      void activeTerminalWindowID(titleForSession(sessionID))
+        .then((window) => {
+          if (disposed) return
+          if (window) {
+            debug(`skip focused session=${sessionID} window=${window}`)
+            return
+          }
+          run()
+        })
+        .catch(() => run())
+    }
+
+    /**
      * The TUI that started the turn wins, then the one that has the session
      * open and is active, then any TUI viewing it, then one in the same
      * directory, and finally any other TUI.
@@ -573,7 +651,7 @@ export default Plugin.define({
         if (owner && !sameInstance(owner.instance, instanceID)) return
         if (!claimEvent(eventID)) return
         debug(`claim session=${sessionID} event=${eventID}`)
-        run()
+        deliverWhenUnfocused(sessionID, run)
       }
 
       if (directory) knownDirectories.set(sessionID, directory)
@@ -617,50 +695,55 @@ export default Plugin.define({
         recordOwner(event.data.sessionID)
       }),
       context.data.on("session.execution.succeeded", (event) => {
+        if (!options.events.succeeded) return
         const session = context.data.session.get(event.data.sessionID)
         // Ignore subagent sessions; the parent session will notify when done.
         if (session?.parentID) return
-        const title = session?.title ? `Sesión completada: ${session.title}` : "Sesión completada"
         const sessionID = event.data.sessionID
         claimAndNotify(event.id, sessionID, event.location?.directory ?? sessionDirectory(sessionID), () => {
           notify({
-            body: `${projectPrefix(sessionID)}${title}`,
+            body: `${projectPrefix(sessionID)}${messages.completed(session?.title)}`,
+            sessionID,
             onOpen: () => void openSession(sessionID),
           })
         })
       }),
       context.data.on("session.execution.failed", (event) => {
+        if (!options.events.failed) return
         const session = context.data.session.get(event.data.sessionID)
         if (session?.parentID) return
-        const message = event.data.error?.message ?? "La sesión terminó con un error"
+        const message = event.data.error?.message?.trim() || messages.failedFallback
         const sessionID = event.data.sessionID
         claimAndNotify(event.id, sessionID, event.location?.directory ?? sessionDirectory(sessionID), () => {
           notify({
             body: `${projectPrefix(sessionID)}${message}`,
             urgency: "critical",
+            sessionID,
             onOpen: () => void openSession(sessionID),
           })
         })
       }),
       context.data.on("permission.asked", (event) => {
+        if (!options.events.permission) return
         const session = context.data.session.get(event.data.sessionID)
-        const detail = session?.title ? ` en ${session.title}` : ""
         const sessionID = event.data.sessionID
         claimAndNotify(event.id, sessionID, event.location?.directory ?? sessionDirectory(sessionID), () => {
           notify({
-            body: `${projectPrefix(sessionID)}Se requiere tu permiso${detail}`,
+            body: `${projectPrefix(sessionID)}${messages.permission(session?.title, permissionDetail(event.data))}`,
             urgency: "critical",
+            sessionID,
             onOpen: () => void openSession(sessionID),
           })
         })
       }),
       context.data.on("form.created", (event) => {
+        if (!options.events.form) return
         const session = context.data.session.get(event.data.form.sessionID)
-        const detail = session?.title ? ` en ${session.title}` : ""
         const sessionID = event.data.form.sessionID
         claimAndNotify(event.id, sessionID, event.location?.directory ?? sessionDirectory(sessionID), () => {
           notify({
-            body: `${projectPrefix(sessionID)}Se requiere tu respuesta${detail}`,
+            body: `${projectPrefix(sessionID)}${messages.form(session?.title, event.data.form.title)}`,
+            sessionID,
             onOpen: () => void openSession(sessionID),
           })
         })
