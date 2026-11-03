@@ -1,0 +1,45 @@
+{
+  "name": "opencode-notify-linux",
+  "version": "1.0.0",
+  "description": "Notificaciones de escritorio para OpenCode TUI en Linux: sesiones terminadas, errores, permisos y formularios.",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/tui.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "notifications",
+    "notify-send",
+    "linux",
+    "tui"
+  ],
+  "license": "MIT",
+  "author": "Andrés Rodríguez Vázquez",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arodriguezvaz/opencode-notify-linux.git"
+  },
+  "homepage": "https://github.com/arodriguezvaz/opencode-notify-linux#readme",
+  "bugs": {
+    "url": "https://github.com/arodriguezvaz/opencode-notify-linux/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2"
+  }
+}
