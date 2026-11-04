@@ -9,7 +9,7 @@ test("opciones por defecto", () => {
     silent: true,
     appName: "OpenCode",
     icon: undefined,
-    debug: true,
+    debug: false,
     maxBodyLength: 180,
     replaceNotifications: true,
     events: { succeeded: true, failed: true, permission: true, form: true },
@@ -41,7 +41,7 @@ test("los valores inválidos caen a los valores por defecto", () => {
   assert.equal(options.silent, true)
   assert.equal(options.appName, "OpenCode")
   assert.equal(options.icon, undefined)
-  assert.equal(options.debug, true)
+  assert.equal(options.debug, false)
   assert.equal(options.maxBodyLength, 180)
   assert.equal(options.replaceNotifications, true)
   assert.deepEqual(options.events, { succeeded: true, failed: true, permission: true, form: true })

@@ -24,7 +24,7 @@ const DEFAULTS = {
   onlyWhenUnfocused: true,
   silent: true,
   appName: "OpenCode",
-  debug: true,
+  debug: false,
   maxBodyLength: 180,
   replaceNotifications: true,
 }

@@ -35,12 +35,15 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "biome check .",
+    "format": "biome check --write ."
   },
   "dependencies": {
     "@opencode/plugin": "^2.2.5"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.6.4",
     "@types/node": "^24.0.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.2"

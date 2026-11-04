@@ -18,11 +18,16 @@ export type SwayWindow = Window & {
   readonly focused: boolean
 }
 
-/** Cut a notification body without leaving a dangling space before the ellipsis. */
+/** Cut a notification body without leaving a dangling space or splitting an emoji. */
 export function truncate(value: string, max: number): string {
   const text = value.trim()
-  if (max <= 0 || text.length <= max) return text
-  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`
+  if (max <= 0) return text
+  const characters = Array.from(text)
+  if (characters.length <= max) return text
+  return `${characters
+    .slice(0, Math.max(0, max - 1))
+    .join("")
+    .trimEnd()}…`
 }
 
 /**
@@ -55,6 +60,16 @@ export function sameLocation(left?: string, right?: string): boolean {
 }
 
 /**
+ * Prefix notifications for sessions from another project so it is obvious
+ * they did not start in the terminal that happens to be open.
+ */
+export function projectPrefixFor(directory: string | undefined, here: string | undefined): string {
+  if (!directory || !here) return ""
+  if (sameLocation(directory, here)) return ""
+  return `${basename(directory) || directory} · `
+}
+
+/**
  * Older plugin versions stored only the PID. Accept those entries when the
  * PID matches so a plugin reload does not orphan the sessions they own.
  */
@@ -65,6 +80,75 @@ export function sameInstance(left: string, right: string): boolean {
   if (leftPID !== rightPID) return false
   if (!leftStart || !rightStart) return true
   return leftStart === rightStart
+}
+
+export type WindowChoice = {
+  ancestors: readonly number[]
+  windows: readonly Window[]
+  expectedTitle?: string
+  activeID?: string
+  preferredTitle?: string
+  sameID: (left?: string, right?: string) => boolean
+}
+
+/**
+ * Pick the window that hosts this TUI. The TUI is a child of that window's
+ * process, so walking up the ancestor PIDs works for terminals, VS Code and
+ * JetBrains. When several windows share a PID, the expected title, the
+ * backend-specific title (Terminator D-Bus) and the active window decide.
+ */
+export function chooseWindow(input: WindowChoice): Window | undefined {
+  for (const pid of input.ancestors) {
+    const candidates = input.windows.filter((window) => window.pid === pid)
+    const first = candidates[0]
+    if (!first) continue
+
+    if (input.expectedTitle) {
+      const exact = candidates.filter((window) => window.title === input.expectedTitle)
+      if (exact.length === 1) return exact[0]
+      if (exact.length > 1) {
+        return exact.find((window) => input.sameID(window.id, input.activeID)) ?? exact[0]
+      }
+    }
+
+    if (candidates.length === 1) return first
+
+    if (input.preferredTitle) {
+      const preferred = candidates.find((window) => window.title === input.preferredTitle)
+      if (preferred) return preferred
+    }
+
+    const activeCandidate = candidates.find((window) => input.sameID(window.id, input.activeID))
+    if (activeCandidate) return activeCandidate
+
+    const fallback = candidates.find(
+      (window) => /(^|\s)OC\s*\|/.test(window.title) || window.title.includes("OpenCode"),
+    )
+    return fallback ?? first
+  }
+  return undefined
+}
+
+export type BackendKind = "hyprland" | "sway" | "x11"
+
+export type BackendEnvironment = {
+  platform?: string
+  xdgSessionType?: string
+  waylandDisplay?: string
+  hyprlandSignature?: string
+  swaySocket?: string
+  display?: string
+}
+
+/** Backend order: Hyprland, sway, then X11/XWayland as the fallback. */
+export function chooseBackend(environment: BackendEnvironment): BackendKind[] {
+  if (environment.platform && environment.platform !== "linux") return []
+  const wayland = environment.xdgSessionType === "wayland" || Boolean(environment.waylandDisplay)
+  const choices: BackendKind[] = []
+  if (wayland && environment.hyprlandSignature) choices.push("hyprland")
+  if (wayland && environment.swaySocket) choices.push("sway")
+  if (environment.display) choices.push("x11")
+  return choices
 }
 
 /**
@@ -78,7 +162,42 @@ export function notificationID(value: string): number {
     hash ^= value.charCodeAt(index)
     hash = Math.imul(hash, 0x01000193)
   }
-  return (hash >>> 0) || 1
+  return hash >>> 0 || 1
+}
+
+export type NotifyArgsInput = {
+  appName: string
+  body: string
+  urgency: "low" | "normal" | "critical"
+  silent: boolean
+  replaceID?: number
+  icon: string
+  cinnamon: boolean
+  labels?: { open: string; dismiss: string }
+}
+
+/**
+ * Build the notify-send argv. Keeping this pure makes the action, urgency,
+ * replacement and silence rules testable without spawning a notification.
+ */
+export function buildNotifyArgs(input: NotifyArgsInput): string[] {
+  const critical = input.urgency === "critical"
+  // Cinnamon always plays its notification sound for critical urgency, even
+  // with suppress-sound. Downgrade only there; other desktops keep the real
+  // critical styling.
+  const urgency = critical && input.cinnamon ? "normal" : input.urgency
+
+  const args = [`--app-name=${input.appName}`]
+  if (input.silent) args.push("--hint=boolean:suppress-sound:true")
+  if (input.replaceID !== undefined) args.push(`--replace-id=${input.replaceID}`)
+  args.push(`--urgency=${urgency}`)
+  args.push(`--icon=${input.icon}`)
+  if (critical) args.push("--expire-time=0", "--hint=boolean:resident:true")
+  if (input.labels) {
+    args.push(`--action=default=${input.labels.open}`, `--action=dismiss=${input.labels.dismiss}`, "--wait")
+  }
+  args.push(input.appName, input.body)
+  return args
 }
 
 export function selectLanguage(locale: string | undefined): "es" | "en" {
@@ -103,6 +222,40 @@ export function permissionDetail(data: PermissionEventData): string | undefined 
 }
 
 /**
+ * Split `$TERMINAL` into a program and its arguments without invoking a
+ * shell. Handles simple quoted paths, which is enough for values such as
+ * `kitty --single-instance` or `"/opt/My Terminal/bin/term"`.
+ */
+export function splitCommand(value: string): string[] {
+  const parts: string[] = []
+  let current = ""
+  let quote: string | undefined
+
+  for (const character of value.trim()) {
+    if (quote) {
+      if (character === quote) quote = undefined
+      else current += character
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      continue
+    }
+    if (/\s/.test(character)) {
+      if (current) {
+        parts.push(current)
+        current = ""
+      }
+      continue
+    }
+    current += character
+  }
+
+  if (current) parts.push(current)
+  return parts
+}
+
+/**
  * Terminals differ in how they accept a working directory and a command.
  * `$TERMINAL` wins when set; the rest are tried in order until one spawns.
  */
@@ -112,7 +265,11 @@ export function terminalAttempts(
   terminal: string | undefined,
 ): TerminalAttempt[] {
   const attempts: TerminalAttempt[] = []
-  if (terminal) attempts.push([terminal, ["-e", ...command]])
+  if (terminal) {
+    const [program, ...args] = splitCommand(terminal)
+    if (program) attempts.push([program, [...args, "-e", ...command]])
+  }
+  attempts.push(["xdg-terminal-exec", [...command]])
 
   const terminator = cwd ? [`--working-directory=${cwd}`, "-x", ...command] : ["-x", ...command]
   attempts.push(["terminator", terminator])
@@ -142,9 +299,7 @@ export function opencodeExecutable(execPath: string): string {
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }
 
 function stringValue(value: unknown, key: string): string | undefined {
@@ -207,4 +362,3 @@ export function parseHyprlandClients(value: unknown): Window[] {
     return window ? [window] : []
   })
 }
-
