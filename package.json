@@ -1,6 +1,6 @@
 {
   "name": "opencode-notify-linux",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Notificaciones de escritorio para OpenCode TUI en Linux: sesiones terminadas, errores, permisos y formularios.",
   "type": "module",
   "exports": {
@@ -10,6 +10,8 @@
     "src",
     "README.md",
     "CHANGELOG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
     "LICENSE"
   ],
   "keywords": [

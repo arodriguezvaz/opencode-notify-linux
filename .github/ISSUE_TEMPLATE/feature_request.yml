@@ -1,0 +1,35 @@
+name: Mejora
+description: Propón una función o un cambio de comportamiento
+title: "[Mejora] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Qué problema resuelve
+      description: Describe la situación actual y por qué es incómoda.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Propuesta
+      description: Cómo te gustaría que funcionara.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Plataforma
+      options:
+        - X11
+        - Wayland (sway)
+        - Wayland (Hyprland)
+        - Wayland (GNOME/KDE)
+        - Todas
+    validations:
+      required: true

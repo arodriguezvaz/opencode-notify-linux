@@ -1,0 +1,65 @@
+name: Bug
+description: Algo no funciona como debería
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No incluyas session IDs, rutas personales, tokens ni claves. Redacta el log antes de pegarlo.
+  - type: input
+    id: opencode
+    attributes:
+      label: Versión de OpenCode
+      placeholder: "opencode --version"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distribución y escritorio
+      placeholder: "Ubuntu 24.04 / Cinnamon 6.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Servidor gráfico
+      options:
+        - X11
+        - Wayland (sway)
+        - Wayland (Hyprland)
+        - Wayland (GNOME)
+        - Wayland (KDE)
+        - Otro
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducir
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Qué esperabas y qué pasó
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log de diagnóstico (redactado)
+      description: Activa `debug: true` y pega solo las líneas relevantes, sin session IDs ni rutas.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Comprobaciones
+      options:
+        - label: He comprobado que `notify-send "Prueba" "Hola"` funciona
+          required: true
+        - label: He redactado session IDs, rutas y comandos del log
+          required: true

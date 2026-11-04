@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnerabilidad de seguridad
+    url: https://github.com/arodriguezvaz/opencode-notify-linux/security/advisories/new
+    about: No publiques vulnerabilidades en un issue público.

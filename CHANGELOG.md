@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.0
+
+- Timeouts en los comandos externos para que un `wmctrl`/`xprop`/`swaymsg`/`hyprctl` colgado no suprima la notificación.
+- Directorio de estado privado (`0700`), ficheros `0600` y protección contra symlinks; el fallback ya no usa `/tmp`.
+- El log de depuración se desactiva por defecto y deja de borrarse con los marcadores.
+- IDs de reemplazo por tipo de evento para no ocultar un permiso pendiente.
+- Fallback a las notificaciones de atención cuando `notify-send` falla, no solo cuando falta.
+- Reintento y plan B al enfocar: si el ID es de otro backend o la ventana desapareció, se navega a la sesión.
+- Caché de ventanas y ancestros, y eliminación de la doble comprobación de foco.
+- `xdg-terminal-exec` y `$TERMINAL` con flags.
+- `truncate` seguro con emojis y prefijo correcto para el directorio raíz.
+- Tests (31), Biome, CI en Node 20/22/24, Dependabot y guías de seguridad/contribución.
+
 ## 1.2.0
 
 - Enfoque de ventanas en Wayland para sway (`swaymsg`) e Hyprland (`hyprctl`), con X11 como fallback.
